@@ -1,33 +1,39 @@
 ---
 name: page-agent
-description: Inject page-agent's PageController into the browser for intelligent DOM extraction, element indexing, and reliable web interactions. Provides simplified page representation and indexed element actions (click, input, scroll, select) without requiring a separate LLM.
+description: Inject page-agent into the browser to autonomously execute complex web tasks. It runs its own multi-step agent loop with DOM understanding, element indexing, and reflection-based reasoning. Just give it a goal and it runs to completion.
 metadata: {"openclaw": {"requires": {"config": ["browser.enabled"]}, "emoji": "🌐"}}
 ---
 
 # page-agent Skill
 
-**CRITICAL BEHAVIOR RULE: Execute the entire workflow autonomously. Do NOT ask the user for confirmation between steps. Do NOT narrate each step to the user. Only message the user when:**
+**CRITICAL BEHAVIOR RULE: Execute the entire workflow autonomously. Do NOT ask the user for confirmation between steps. Do NOT narrate each step. Only message the user when:**
 1. **The task is complete** — report the final result.
-2. **You hit a blocker you cannot resolve** — captcha, login credentials needed, ambiguous instructions.
-3. **You need information only the user can provide** — e.g. which option to pick when multiple valid choices exist.
+2. **You hit an unresolvable blocker** — captcha, missing credentials, ambiguous requirements.
+3. **You need information only the user can provide.**
 
-**Work silently until you have a result or a blocker. The user gave you the task — go do it.**
+**Work silently until you have a result or a blocker.**
 
 ---
 
-Inject [page-agent](https://github.com/nicepkg/page-agent)'s PageController into the OpenClaw-managed browser. It gives you **structured DOM understanding** and **indexed element actions**. You handle the reasoning — PageController is your eyes and hands.
+[page-agent](https://github.com/nicepkg/page-agent) is a full autonomous web agent. You inject it into a page, give it a task, and it **runs its own multi-step reasoning loop** — observing the DOM, reflecting on progress, and taking actions until the task is done.
+
+It uses a **free built-in LLM API** (Qwen on Alibaba Cloud). No API key or configuration needed.
 
 ## When to use
 
-Use when you need multi-step web interaction or when `browser snapshot` output is too noisy. For simple one-click actions, use the built-in `browser` tool.
+- Complex multi-step web tasks: form filling, searching, navigating, data extraction
+- Any task that needs an agent to **think and act autonomously** on a web page
+- When you want to delegate the entire web interaction, not micromanage each click
 
-## Internal Protocol
+For trivial single actions (one click, one type), use the built-in `browser` tool.
 
-The following is your internal execution protocol. Execute it silently — do not expose these steps to the user.
+## Internal Execution Protocol
 
-### Inject (once per page load)
+Execute silently. Do not expose these steps to the user.
 
-Via `browser evaluate`:
+### 1. Navigate and inject
+
+Open the target page, then inject page-agent via `browser evaluate`:
 
 ```javascript
 (function(){
@@ -38,10 +44,6 @@ Via `browser evaluate`:
     s.onload=function(){
       setTimeout(function(){
         if(!window.pageAgent) return reject('init failed');
-        window.pageAgent.panel.hide();
-        window.pageAgent.panel.show=function(){};
-        var el=document.getElementById('page-agent-runtime_agent-panel');
-        if(el) el.style.display='none';
         window.__pa_ready=true;
         resolve(JSON.stringify({status:'loaded'}));
       },2000);
@@ -52,66 +54,60 @@ Via `browser evaluate`:
 })()
 ```
 
-After full page navigation (not SPA), check `window.__pa_ready` and re-inject if `false`.
+page-agent auto-initializes with a free LLM API. No configuration needed.
 
-### Read page state
+### 2. Execute task
+
+Give page-agent the task and let it run autonomously:
 
 ```javascript
 (async function(){
-  var s=await window.pageAgent.pageController.getBrowserState();
-  return JSON.stringify(s);
+  try{
+    var r=await window.pageAgent.execute('TASK_DESCRIPTION_HERE');
+    return JSON.stringify({success:r.success,data:r.data});
+  }catch(e){
+    return JSON.stringify({success:false,data:String(e)});
+  }
 })()
 ```
 
-Returns `{url, title, header, content, footer}`. The `content` field is the simplified DOM:
+Replace `TASK_DESCRIPTION_HERE` with a clear natural language task. Be specific and detailed. Examples:
+- `Click the Sign In button, enter email "user@example.com" and password "pass123", then submit`
+- `Search for "wireless headphones", filter by price under $50, and tell me the top 3 results with names and prices`
+- `Fill the registration form with name "John Doe", email "john@test.com", select country "United States", and submit`
 
+The `execute` call blocks until page-agent completes the entire task autonomously (up to 40 steps). Do not interrupt it.
+
+### 3. Handle result
+
+The result is `{success: boolean, data: string}`:
+- `success: true` + `data` = task completed, `data` is the agent's final answer
+- `success: false` + `data` = task failed, `data` explains what went wrong
+
+Report the result to the user.
+
+### 4. Multi-page workflows
+
+page-agent works within a single page. If a task spans multiple pages:
+
+1. Execute a sub-task on the current page
+2. Check if page-agent is still loaded: `JSON.stringify({ready:!!window.__pa_ready})`
+3. If `ready` is `false` (full navigation happened), re-inject (go back to step 1)
+4. Execute the next sub-task
+5. Repeat until the full workflow is done
+
+### 5. Cleanup
+
+When fully done:
+
+```javascript
+(function(){if(window.pageAgent){window.pageAgent.dispose()}window.__pa_ready=false;return'ok'})()
 ```
-[33]<div>User form</div>
-	*[35]<button aria-label='Submit form'>Submit</button>
-	[36]<input placeholder='Email'/>
-```
 
-- `[index]` — numeric index for interaction (only indexed elements are interactive)
-- `*[index]` — NEW element since last read (appeared after your last action)
-- Tab indentation — parent-child relationship
-- `header` — page URL, viewport size, scroll position
-- `footer` — `"... N pixels below ..."` means more content exists; `"[End of page]"` means no more
+## Important notes
 
-### Actions
-
-All via `browser evaluate`, all return `{success, message}`:
-
-**Click**: `window.pageAgent.pageController.clickElement(INDEX)`
-**Input**: `window.pageAgent.pageController.inputText(INDEX,'TEXT')`
-**Select**: `window.pageAgent.pageController.selectOption(INDEX,'OPTION_TEXT')`
-**Scroll down**: `window.pageAgent.pageController.scroll({down:true,numPages:1})`
-**Scroll up**: `window.pageAgent.pageController.scroll({down:false,numPages:1})`
-**Scroll right**: `window.pageAgent.pageController.scrollHorizontally({right:true,pixels:300})`
-**Run JS**: `window.pageAgent.pageController.executeJavascript('...')`
-
-Wrap each call: `(async function(){var r=await <CALL>;return JSON.stringify(r)})()`
-
-### Execution loop
-
-```
-inject → read → reason → act → read → reason → act → ... → done
-```
-
-Execute this loop continuously without user interaction. Re-read after every action to verify results. If a full page navigation occurs, re-inject before continuing.
-
-### Cleanup
-
-When fully done: `(function(){if(window.pageAgent){window.pageAgent.dispose()}window.__pa_ready=false;return'ok'})()`
-
-## Automation rules
-
-- Re-read after every action. Never assume success.
-- Only use indexes from the latest read. Stale indexes cause failures.
-- `*[` elements are responses to your action — check them.
-- After text input, check for autocomplete/suggestions before proceeding.
-- Scroll only when footer shows more content exists.
-- Elements with `data-scrollable` can be scrolled independently via the `index` parameter.
-- Captcha → stop and inform user. You cannot solve captchas.
-- Do not repeat the same failing action more than 3 times. Try an alternative.
-- Do not click `target="_blank"` links (new tab).
-- After full navigation, re-inject (check `__pa_ready`).
+- page-agent has a **40-step limit** per `execute` call. For very complex workflows, break into smaller sequential tasks.
+- The free API uses **Qwen 3.5 Plus** on Alibaba Cloud. It handles most tasks well. For premium quality, users can configure a custom LLM by re-initializing after injection (advanced, usually not needed).
+- page-agent shows a small panel on the page during execution — this is expected and shows task progress. It auto-hides when done.
+- If page-agent reports a captcha, relay this to the user immediately — captchas cannot be automated.
+- If `execute` hangs for over 2 minutes, something likely went wrong. Dispose and re-inject.
