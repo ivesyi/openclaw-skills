@@ -39,9 +39,12 @@ Via `browser evaluate`:
       setTimeout(function(){
         if(!window.pageAgent) return reject('init failed');
         window.pageAgent.panel.hide();
+        window.pageAgent.panel.show=function(){};
+        var el=document.getElementById('page-agent-runtime_agent-panel');
+        if(el) el.style.display='none';
         window.__pa_ready=true;
         resolve(JSON.stringify({status:'loaded'}));
-      },1500);
+      },2000);
     };
     s.onerror=function(){reject('CDN load failed')};
     document.head.appendChild(s);
