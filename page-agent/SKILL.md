@@ -8,24 +8,23 @@ metadata: {"openclaw": {"requires": {"config": ["browser.enabled"]}, "primaryEnv
 
 Use [page-agent](https://github.com/nicepkg/page-agent) to perform intelligent, multi-step web automation tasks on any page in the OpenClaw-managed browser.
 
-page-agent injects directly into a web page and provides:
-- **DOM simplification pipeline**: converts complex pages into a concise text representation an LLM can reason about
+page-agent provides:
+- **DOM simplification pipeline**: converts complex pages into concise text that an LLM can reason about
 - **Indexed element system**: every interactive element gets a numeric index for reliable targeting
 - **Autonomous agent loop**: reflection-before-action mental model with memory across steps
+- **Tools**: click, input text, select dropdown, scroll (vertical/horizontal), execute JavaScript, wait, ask user
 
-## When to use this skill
+## When to use
 
-- The user asks you to **perform a complex, multi-step web task** (e.g. "fill out this form", "find and click the pricing link", "search for X and add the first result to cart")
-- Standard `browser` snapshot + click/type is insufficient because the page is complex or the task requires understanding page structure
+- The user asks to **perform a complex, multi-step web task** (e.g. "fill out this form", "search for X and add the first result to cart")
+- Standard `browser` snapshot + click/type is insufficient because the page is complex or multi-step reasoning is needed
 - You need to delegate a web task and get a structured result back
 
-Do NOT use this skill for simple single-action browser operations (one click, one type). Use the built-in `browser` tool directly for those.
+Do NOT use for simple single-action browser operations — use the built-in `browser` tool directly.
 
 ## Setup
 
-The skill needs an OpenAI-compatible LLM API to drive the page-agent reasoning loop.
-
-Configure in `~/.openclaw/openclaw.json`:
+Configure in `~/.openclaw/openclaw.json` (optional — works without config using the free testing API):
 
 ```json5
 {
@@ -44,13 +43,11 @@ Configure in `~/.openclaw/openclaw.json`:
 }
 ```
 
-If no env vars are set, page-agent falls back to its **free testing API** (rate-limited, evaluation only).
+## Complete Usage Protocol
 
-## Usage
+Follow these steps exactly. All code blocks are for `browser evaluate`.
 
 ### Step 1: Navigate to the target page
-
-Use the `browser` tool to open the page you want to automate:
 
 ```
 browser open https://example.com
@@ -58,86 +55,148 @@ browser open https://example.com
 
 ### Step 2: Inject page-agent
 
-Run this JavaScript via `browser evaluate` to load page-agent into the current tab:
+Run via `browser evaluate`:
 
 ```javascript
 (function() {
-  if (window.__pageAgentLoaded) return 'already loaded';
+  if (window.__pa && window.__pa.ready) return JSON.stringify({status:'already_loaded'});
+  window.__pa = { ready: false, pending: null, resolve: null };
   return new Promise(function(resolve, reject) {
     var s = document.createElement('script');
     s.src = 'https://cdn.jsdelivr.net/npm/page-agent@1/dist/iife/page-agent.demo.js';
     s.onload = function() {
-      window.__pageAgentLoaded = true;
-      resolve('page-agent loaded');
+      setTimeout(function() {
+        if (!window.pageAgent || !window.PageAgent) {
+          reject('page-agent failed to initialize');
+          return;
+        }
+        window.pageAgent.panel.hide();
+        window.pageAgent.onAskUser = function(question) {
+          return new Promise(function(res) {
+            window.__pa.pending = question;
+            window.__pa.resolve = res;
+          });
+        };
+        window.__pa.ready = true;
+        resolve(JSON.stringify({status:'loaded'}));
+      }, 1500);
     };
-    s.onerror = function() { reject('failed to load page-agent'); };
+    s.onerror = function() { reject('failed to load page-agent from CDN'); };
     document.head.appendChild(s);
   });
 })()
 ```
 
-Wait ~2 seconds for initialization, then verify:
-
-```javascript
-!!window.pageAgent && !!window.PageAgent
-```
-
 ### Step 3: (Optional) Reconfigure with custom LLM
 
-If the user has set `PAGE_AGENT_*` env vars and wants to use their own LLM instead of the free testing API, reconfigure after injection:
+Only if `PAGE_AGENT_*` env vars are set. Skip if using the free testing API.
 
 ```javascript
 (function() {
-  if (!window.PageAgent) return 'page-agent not loaded';
-  if (window.pageAgent) window.pageAgent.dispose();
+  if (!window.PageAgent) return JSON.stringify({error:'not_loaded'});
+  var oldAskUser = window.pageAgent.onAskUser;
+  window.pageAgent.dispose();
   window.pageAgent = new window.PageAgent({
-    model: '__PAGE_AGENT_MODEL__',
-    baseURL: '__PAGE_AGENT_BASE_URL__',
-    apiKey: '__PAGE_AGENT_API_KEY__',
+    model: 'MODEL_NAME_HERE',
+    baseURL: 'BASE_URL_HERE',
+    apiKey: 'API_KEY_HERE',
     language: 'en-US',
     enableMask: false
   });
-  return 'reconfigured';
+  window.pageAgent.onAskUser = oldAskUser;
+  window.__pa.ready = true;
+  return JSON.stringify({status:'reconfigured'});
 })()
 ```
 
-Replace the `__PAGE_AGENT_*__` placeholders with the actual env var values.
-
-If no custom config is needed, skip this step — the demo script auto-initializes with the free testing API.
+Replace `MODEL_NAME_HERE`, `BASE_URL_HERE`, `API_KEY_HERE` with actual env var values.
 
 ### Step 4: Execute a task
 
 ```javascript
 (async function() {
-  var result = await window.pageAgent.execute('YOUR TASK DESCRIPTION HERE');
-  return JSON.stringify({ success: result.success, data: result.data });
+  if (!window.__pa || !window.__pa.ready) return JSON.stringify({error:'not_loaded'});
+  try {
+    var result = await window.pageAgent.execute('TASK_DESCRIPTION_HERE');
+    return JSON.stringify({success: result.success, data: result.data});
+  } catch(e) {
+    return JSON.stringify({success: false, data: String(e)});
+  }
 })()
 ```
 
-The task description should be a natural language instruction, e.g.:
-- `"Click the Sign In button"`
-- `"Fill the search box with 'OpenClaw' and press Enter"`
-- `"Find the pricing table and extract all plan names and prices"`
-- `"Navigate to Settings, then change the language to English"`
+Replace `TASK_DESCRIPTION_HERE` with the natural language task. Examples:
+- `Click the Sign In button`
+- `Fill the search box with 'OpenClaw' and press Enter`
+- `Find the pricing table and extract all plan names and prices`
+- `Navigate to Settings, then change the language to English`
 
-### Step 5: Read the result
+### Step 5: Handle ask_user (if page-agent asks a question)
 
-The execute call returns `{ success: boolean, data: string }`:
-- `success: true` — task completed successfully, `data` contains the agent's final response
-- `success: false` — task failed or was stopped, `data` contains the error or partial result
-
-### Cleanup
-
-When done, dispose the agent to free resources:
+After starting a task, if the execute call does not resolve quickly, check for pending questions:
 
 ```javascript
-if (window.pageAgent) { window.pageAgent.dispose(); window.__pageAgentLoaded = false; }
+(function() {
+  if (!window.__pa) return JSON.stringify({pending:null});
+  return JSON.stringify({pending: window.__pa.pending});
+})()
 ```
+
+If `pending` is not null, the agent is waiting for an answer. Provide it:
+
+```javascript
+(function() {
+  if (window.__pa && window.__pa.resolve) {
+    window.__pa.resolve('YOUR_ANSWER_HERE');
+    window.__pa.pending = null;
+    window.__pa.resolve = null;
+    return JSON.stringify({answered: true});
+  }
+  return JSON.stringify({answered: false});
+})()
+```
+
+### Step 6: Handle page navigation (re-injection)
+
+If the task caused a full page navigation (not SPA), page-agent is lost. Detect and re-inject:
+
+```javascript
+(function() {
+  return JSON.stringify({loaded: !!(window.__pa && window.__pa.ready && window.pageAgent && !window.pageAgent.disposed)});
+})()
+```
+
+If `loaded` is `false`, go back to **Step 2** to re-inject before running the next task.
+
+**Important**: SPA navigations (pushState/replaceState) do NOT require re-injection. Only full page reloads do.
+
+### Step 7: Cleanup
+
+When completely done with all web automation:
+
+```javascript
+(function() {
+  if (window.pageAgent) { window.pageAgent.dispose(); }
+  window.__pa = null;
+  return JSON.stringify({cleaned: true});
+})()
+```
+
+## Multi-task workflow
+
+For tasks that span multiple pages:
+
+1. Execute task on current page (Step 4)
+2. Check if page-agent is still loaded (Step 6)
+3. If not loaded (full navigation happened), re-inject (Step 2) and optionally reconfigure (Step 3)
+4. Execute next task (Step 4)
+5. Repeat until done
+6. Cleanup (Step 7)
 
 ## Tips
 
-- page-agent works best on pages that are fully loaded. Wait for the page to stabilize before executing tasks.
-- For multi-page workflows, you may need to re-inject after navigation (check `window.__pageAgentLoaded`).
-- The free testing API uses Qwen models hosted on Alibaba Cloud. For better quality, configure your own LLM.
-- page-agent has a 40-step limit per task. For very long workflows, break them into smaller tasks.
-- If a task fails, check the browser console for detailed logs.
+- page-agent works best on **fully loaded** pages. Wait 1-2 seconds after navigation before injecting.
+- The free testing API uses Qwen models on Alibaba Cloud. For better quality on complex tasks, configure GPT-4o or Claude via env vars.
+- page-agent has a **40-step limit** per task. For very long workflows, break them into smaller sequential tasks.
+- If `execute` returns `{success: false}`, check the browser console logs (`browser console` or `browser evaluate` with `console.log`) for details.
+- The panel UI is hidden by default in this skill. If you need visual debugging, remove the `panel.hide()` call in Step 2.
